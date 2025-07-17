@@ -107,6 +107,7 @@
             :on-studio-panel-close="handleStudioPanelClose"
             :event-manager="eventManager"
             :studio-status="studioStatus"
+            :aut-url-selector="autUrlSelector"
           />
         </HideDuringScreenshot>
       </template>
@@ -146,6 +147,9 @@ import StudioSaveModal from './studio/StudioSaveModal.vue'
 import { useStudioStore } from '../store/studio-store'
 import StudioPanel from '../studio/StudioPanel.vue'
 import { useSubscription } from '../graphql'
+
+// this is used by the StudioPanel to access the AUT URL input
+const autUrlSelector = '.aut-url-input'
 
 const {
   preferredMinimumPanelWidth,
