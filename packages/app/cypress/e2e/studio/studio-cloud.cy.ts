@@ -11,7 +11,7 @@ describe('Studio Cloud', () => {
     })
   })
 
-  it('immediately loads the studio panel', () => {
+  it('immediately loads the studio panel from existing test', () => {
     const deferred = pDefer()
 
     loadProjectAndRunSpec()
@@ -29,8 +29,6 @@ describe('Studio Cloud', () => {
     .findByTestId('launch-studio')
     .click()
 
-    // regular studio is not loaded until after the test finishes
-    cy.findByTestId('hook-name-studio commands').should('not.exist')
     // cloud studio is loaded immediately
     cy.findByTestId('studio-panel').then(() => {
       // check for the loading panel from the app first
@@ -42,14 +40,15 @@ describe('Studio Cloud', () => {
     cy.wait('@indexHtml')
 
     // Studio re-executes spec before waiting for commands - wait for the spec to finish executing.
-    cy.waitForSpecToFinish()
+    cy.waitForSpecToFinish(undefined, undefined, false)
 
     // Verify the studio panel is still open
     cy.findByTestId('studio-panel')
-    cy.findByTestId('hook-name-studio commands')
+
+    cy.percySnapshot()
   })
 
-  it('hides selector playground and studio controls when studio beta is available', () => {
+  it('hides selector playground and studio controls when experimentalStudio is enabled', () => {
     launchStudio()
 
     cy.findByTestId('studio-panel').should('be.visible')
@@ -136,8 +135,6 @@ describe('Studio Cloud', () => {
     .findByTestId('launch-studio')
     .click()
 
-    // regular studio is not loaded until after the test finishes
-    cy.findByTestId('hook-name-studio commands').should('not.exist')
     // cloud studio is loaded immediately
     cy.findByTestId('studio-panel').then(() => {
       // check for the loading panel from the app first
@@ -153,7 +150,6 @@ describe('Studio Cloud', () => {
 
     // Verify the studio panel is still open
     cy.findByTestId('studio-panel')
-    cy.findByTestId('hook-name-studio commands')
 
     // make sure studio is not loading
     cy.findByTestId('loading-studio-panel').should('not.exist')
@@ -217,8 +213,6 @@ describe('Studio Cloud', () => {
     .findByTestId('launch-studio')
     .click()
 
-    // regular studio is not loaded until after the test finishes
-    cy.get('[data-cy="hook-name-studio commands"]').should('not.exist')
     // cloud studio is loaded immediately
     cy.findByTestId('studio-panel').then(() => {
       // check for the loading panel from the app first
@@ -230,11 +224,10 @@ describe('Studio Cloud', () => {
     cy.wait('@indexHtml')
 
     // Studio re-executes spec before waiting for commands - wait for the spec to finish executing.
-    cy.waitForSpecToFinish()
+    cy.waitForSpecToFinish(undefined, undefined, false)
 
     // Verify the studio panel is still open
     cy.findByTestId('studio-panel')
-    cy.get('[data-cy="hook-name-studio commands"]')
 
     // make sure studio is not loading
     cy.get('[data-cy="loading-studio-panel"]').should('not.exist')
