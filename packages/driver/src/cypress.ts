@@ -173,6 +173,8 @@ class $Cypress {
   sinon = sinon
   lolex = fakeTimers
 
+  areSourceMapsAvailable: boolean = false
+
   static $: any
   static utils: any
 
@@ -188,7 +190,7 @@ class $Cypress {
     this.primaryOriginCommunicator = new PrimaryOriginCommunicator()
     this.specBridgeCommunicator = new SpecBridgeCommunicator()
     this.isCrossOriginSpecBridge = false
-
+    this.areSourceMapsAvailable = false
     this.events = $Events.extend(this)
     this.$ = jqueryProxyFn.bind(this)
 
@@ -365,6 +367,7 @@ class $Cypress {
 
     this.events.proxyTo(this.cy)
 
+    this.areSourceMapsAvailable = false
     $scriptUtils.runScripts({
       browser: this.config('browser'),
       scripts,
@@ -372,6 +375,7 @@ class $Cypress {
       testingType: this.testingType,
     })
     .then(() => {
+      this.areSourceMapsAvailable = $sourceMapUtils.areSourceMapsAvailable()
       if (this.testingType === 'e2e') {
         return setSpecContentSecurityPolicy(specWindow)
       }
