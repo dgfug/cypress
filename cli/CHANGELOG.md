@@ -42,6 +42,7 @@ _Released 08/12/2025 (PENDING)_
 - Filters content written to stderr to prevent Electron from spamming with inconsequential errors/warnings. This stderr content can be viewed by enabling the `cypress:internal-stderr` debug namespace. Fixes [#32070](https://github.com/cypress-io/cypress/issues/32070)
 - Fixed an issue where Angular Component Testing was printing extraneous warnings to the console by default. By default, errors only will now print to the console. This can still be overridden by passing in a custom webpack config or setting the `verbose` option inside your `angular.json`. Addresses [#26456](https://github.com/cypress-io/cypress/issues/26456).
 - Fixed an issue where `ts-loader` was improperly being detected inside `@cypress/webpack-preprocessor`. Fixes [#32265](https://github.com/cypress-io/cypress/issues/32265).
+- Fixed an issue where `.fixture()` calls with `null` and `undefined` encoding options would incorrectly share cache entries, causing unexpected content to be returned. Cache keys now properly distinguish between these encoding values. Fixes [#32274](https://github.com/cypress-io/cypress/issues/32274).
 
 **Misc:**
 
