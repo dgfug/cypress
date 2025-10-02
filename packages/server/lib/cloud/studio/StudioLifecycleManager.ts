@@ -189,7 +189,7 @@ export class StudioLifecycleManager {
     telemetryManager.mark(BUNDLE_LIFECYCLE_MARK_NAMES.ENSURE_STUDIO_BUNDLE_START)
     if (!process.env.CYPRESS_LOCAL_STUDIO_PATH) {
       // The studio hash is the last part of the studio URL, after the last slash and before the extension
-      studioHash = studioSession.studioUrl.split('/').pop()?.split('.')[0]
+      studioHash = studioSession.studioUrl.split('/').pop()?.split('.')[0] ?? ''
       studioPath = path.join(os.tmpdir(), 'cypress', 'studio', studioHash)
 
       // Store the current studio hash so that we can clear the cache entry when retrying
@@ -263,7 +263,7 @@ export class StudioLifecycleManager {
       const protocolManager = new ProtocolManager()
 
       telemetryManager.mark(BUNDLE_LIFECYCLE_MARK_NAMES.STUDIO_PROTOCOL_GET_START)
-      const script = await api.getCaptureProtocolScript(studioSession.protocolUrl)
+      const script = await api.getCaptureProtocolScript(studioSession.protocolUrl, { displayRetryErrors: false })
 
       telemetryManager.mark(BUNDLE_LIFECYCLE_MARK_NAMES.STUDIO_PROTOCOL_GET_END)
 
