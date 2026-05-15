@@ -26,11 +26,14 @@ import crypto from 'crypto'
 import { logError } from '@packages/stderr-filtering'
 import { isNonRetriableCertErrorCode } from '../network/non_retriable_cert_error_codes'
 import type { DebugData } from '@packages/types'
+import { GracefulExit } from '../../util/graceful-exit'
+import type { ExitStepKey } from '../../util/graceful-exit'
 
 const debug = Debug('cypress:server:studio-lifecycle-manager')
 const routes = require('../routes')
 
 export class StudioLifecycleManager {
+  private static teardown: ExitStepKey | null = null
   private static hashLoadingMap: Map<string, Promise<{ manifest: Record<string, string>, studioPath: string }>> = new Map()
   private static watcher: chokidar.FSWatcher | null = null
   private studioManagerPromise?: Promise<StudioManager | null>
@@ -56,7 +59,7 @@ export class StudioLifecycleManager {
    * @param debugData Debug data for the configuration
    * @param ctx Data context to register this instance with
    */
-  initializeStudioManager ({
+  async initializeStudioManager ({
     cloudDataSource,
     cfg,
     debugData,
@@ -66,7 +69,7 @@ export class StudioLifecycleManager {
     cfg: Cfg
     debugData: any
     ctx: DataContext
-  }): void {
+  }): Promise<void> {
     debug('Initializing studio manager')
 
     // Store initialization parameters for retry
@@ -134,7 +137,7 @@ export class StudioLifecycleManager {
 
     this.studioManagerPromise = studioManagerPromise
 
-    this.setupWatcher({
+    await this.setupWatcher({
       cloudDataSource,
       cfg,
       debugData,
@@ -336,7 +339,12 @@ export class StudioLifecycleManager {
     }
   }
 
-  private setupWatcher ({
+  static async close () {
+    StudioLifecycleManager.watcher?.removeAllListeners()
+    await StudioLifecycleManager.watcher?.close().catch(() => {})
+  }
+
+  private async setupWatcher ({
     cloudDataSource,
     cfg,
     debugData,
@@ -355,8 +363,17 @@ export class StudioLifecycleManager {
     // Close the watcher if a previous watcher exists
     if (StudioLifecycleManager.watcher) {
       StudioLifecycleManager.watcher.removeAllListeners()
-      StudioLifecycleManager.watcher.close().catch(() => {})
+      await StudioLifecycleManager.close().catch(() => {})
     }
+
+    if (StudioLifecycleManager.teardown) {
+      GracefulExit.removeStep(StudioLifecycleManager.teardown)
+      StudioLifecycleManager.teardown = null
+    }
+
+    StudioLifecycleManager.teardown = GracefulExit.addStep(async () => {
+      await StudioLifecycleManager.close()
+    }, 'close studio watcher')
 
     // Watch for changes to the studio bundle
     StudioLifecycleManager.watcher = chokidar.watch(path.join(process.env.CYPRESS_LOCAL_STUDIO_PATH, 'server', 'index.js'), {
@@ -411,7 +428,7 @@ export class StudioLifecycleManager {
     return !!(this.lastStatus === 'IN_ERROR' && this.lastErrorCode && isNonRetriableCertErrorCode(this.lastErrorCode))
   }
 
-  public retry (): void {
+  public async retry (): Promise<void> {
     if (!this.ctx) {
       debug('No ctx available, cannot retry studio initialization')
 
@@ -438,7 +455,7 @@ export class StudioLifecycleManager {
 
     // Re-initialize with the same parameters we stored
     if (this.initializationParams) {
-      this.initializeStudioManager(this.initializationParams)
+      await this.initializeStudioManager(this.initializationParams)
     } else {
       debug('No initialization parameters available for retry')
       this.updateStatus('IN_ERROR')
