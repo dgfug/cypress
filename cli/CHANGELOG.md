@@ -1,6 +1,10 @@
 <!-- See ../guides/writing-the-cypress-changelog.md for details on writing the changelog. -->
 ## 15.17.1
 
+**Performance:**
+
+- Fixed an issue where an application that repeatedly threw the same uncaught exception (for example, a benign `ResizeObserver loop ...` notification fired on every animation frame) could exhaust renderer memory and crash the browser. Consecutive identical uncaught exceptions within a test now collapse into a single, updating command-log entry, and a handled (suppressed) uncaught exception no longer captures a DOM snapshot. Addresses [#27415](https://github.com/cypress-io/cypress/issues/27415).
+
 **Bugfixes:**
 
 - Fixed an issue where setting [`numTestsKeptInMemory`](https://on.cypress.io/configuration#Global) to a value greater than `0` from `setupNodeEvents` would take effect during `cypress run`, which could prevent snapshots from being captured correctly when recording Test Replay to Cypress Cloud. During `cypress run`, `numTestsKeptInMemory` is now always treated as `0` regardless of how it is configured. Fixes [#31167](https://github.com/cypress-io/cypress/issues/31167).
