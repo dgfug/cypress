@@ -68,6 +68,7 @@ type WebKitAutomationOpts = {
   initialUrl: string
   downloadsFolder: string
   videoApi?: RunModeVideoApi
+  userAgent?: string | null
   isHeadless: boolean
 }
 
@@ -76,11 +77,13 @@ export class WebKitAutomation {
   private browser: playwright.Browser
   private context!: playwright.BrowserContext
   private page!: playwright.Page
+  private userAgent: string | null
   private isHeadless: boolean
 
   private constructor (opts: WebKitAutomationOpts) {
     this.automation = opts.automation
     this.browser = opts.browser
+    this.userAgent = opts.userAgent ?? null
     this.isHeadless = opts.isHeadless
   }
 
@@ -98,6 +101,7 @@ export class WebKitAutomation {
     // new context comes with new cache + storage
     const newContext = await this.browser.newContext({
       ignoreHTTPSErrors: true,
+      ...(this.userAgent ? { userAgent: this.userAgent } : {}),
       // In headless mode, set a standard devicePixelRatio so that screenshots
       // are consistent regardless of the host machine's DPI (e.g. 2x locally
       // vs 1x in CI) and to avoid fuzzy text on high-DPI displays. This mirrors
