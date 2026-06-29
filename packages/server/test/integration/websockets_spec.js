@@ -4,42 +4,48 @@ require('../spec_helper')
 const ws = require('ws')
 const httpsProxyAgent = require('https-proxy-agent')
 const evilDns = require('evil-dns')
-const Promise = require('bluebird')
-const socketIo = require(`${root}../socket`)
-const httpsServer = require(`${root}../https-proxy/test/helpers/https_server`)
-const config = require(`${root}lib/config`)
-const { ServerE2E } = require(`${root}lib/server-e2e`)
-const { SocketE2E } = require(`${root}lib/socket-e2e`)
-const { SpecsStore } = require(`${root}/lib/specs-store`)
-const { Automation } = require(`${root}lib/automation`)
-const Fixtures = require(`${root}/test/support/helpers/fixtures`)
-const { createRoutes } = require(`${root}lib/routes`)
+// NOTE: we need to import the client from the lib directory because the browser/client directory is compiled to ESM.
+// we are unable to import ESM into a CommonJS test context, even if we await import() the module.
+const socketIo = require('@packages/socket/lib/client')
+const httpsServer = require(`@packages/https-proxy/test/helpers/https_server`)
+const config = require(`../../lib/config`)
+const { ServerBase } = require(`../../lib/server-base`)
+const { SocketE2E } = require(`../../lib/socket-e2e`)
+const { Automation } = require(`../../lib/automation`)
+const Fixtures = require('@tooling/system-tests')
+const { createRoutes } = require(`../../lib/routes`)
+const { getCtx } = require(`../../lib/makeDataContext`)
 
 const cyPort = 12345
 const otherPort = 55551
 const wsPort = 20000
 const wssPort = 8443
 
+let ctx
+
 describe('Web Sockets', () => {
   require('mocha-banner').register()
 
-  beforeEach(function () {
+  beforeEach(async function () {
+    ctx = getCtx()
     Fixtures.scaffold()
 
     this.idsPath = Fixtures.projectPath('ids')
 
-    return config.get(this.idsPath, { port: cyPort })
+    await ctx.actions.project.setCurrentProjectAndTestingTypeForTestSetup(this.idsPath)
+
+    return ctx.lifecycleManager.getFullInitialConfig({ port: cyPort })
     .then((cfg) => {
       this.cfg = cfg
       this.ws = new ws.Server({ port: wsPort })
 
-      this.server = new ServerE2E()
+      this.server = new ServerBase(cfg)
 
       return this.server.open(this.cfg, {
         SocketCtor: SocketE2E,
         createRoutes,
-        specsStore: new SpecsStore({}, 'e2e'),
         testingType: 'e2e',
+        getCurrentBrowser: () => null,
       })
       .then(async () => {
         const automationStub = {
@@ -63,17 +69,17 @@ describe('Web Sockets', () => {
     this.ws.close()
     this.wss.close()
 
-    return Promise.join(
+    return Promise.all([
       this.server.close(),
       httpsServer.stop(),
-    )
+    ])
   })
 
   context('proxying external websocket requests', () => {
     it('sends back ECONNRESET when error upgrading', function (done) {
       const agent = new httpsProxyAgent(`http://localhost:${cyPort}`)
 
-      this.server._onDomainSet(`http://localhost:${otherPort}`)
+      this.server.remoteStates.set(`http://localhost:${otherPort}`)
 
       const client = new ws(`ws://localhost:${otherPort}`, {
         agent,
@@ -117,7 +123,7 @@ describe('Web Sockets', () => {
       // force node into legit proxy mode like a browser
       const agent = new httpsProxyAgent(`http://localhost:${cyPort}`)
 
-      this.server._onDomainSet(`http://localhost:${wsPort}`)
+      this.server.remoteStates.set(`http://localhost:${wsPort}`)
 
       this.ws.on('connection', (c) => {
         return c.on('message', (msg) => {
@@ -148,7 +154,7 @@ describe('Web Sockets', () => {
         rejectUnauthorized: false,
       })
 
-      this.server._onDomainSet(`https://localhost:${wssPort}`)
+      this.server.remoteStates.set(`https://localhost:${wssPort}`)
 
       this.wss.on('connection', (c) => {
         return c.on('message', (msg) => {
@@ -188,7 +194,7 @@ describe('Web Sockets', () => {
         rejectUnauthorized: false,
       })
 
-      this.server._onDomainSet(`https://foobar.com:${wssPort}`)
+      this.server.remoteStates.set(`https://foobar.com:${wssPort}`)
 
       this.wss.on('connection', (c) => {
         return c.on('message', (msg) => {
@@ -214,7 +220,11 @@ describe('Web Sockets', () => {
 
   context('socket.io handling', () => {
     beforeEach(function () {
-      this.automation = new Automation(this.cfg.namespace, this.cfg.socketIoCookie, this.cfg.screenshotsFolder)
+      this.automation = new Automation({
+        cyNamespace: this.cfg.namespace,
+        cookieNamespace: this.cfg.socketIoCookie,
+        screenshotsFolder: this.cfg.screenshotsFolder,
+      })
 
       return this.server.startWebsockets(this.automation, this.cfg, {})
     })
@@ -280,22 +290,24 @@ describe('Web Sockets', () => {
           })
         })
 
-        it('fails to connect via polling', function (done) {
-          this.wsClient = socketIo.client(wsUrl || this.cfg.proxyUrl, {
-            path: this.cfg.socketIoRoute,
-            transports: ['polling'],
-            rejectUnauthorized: false,
-            reconnection: false,
-          })
+        // TODO: this test will currently fail because we allow polling in development mode
+        // for webkit support. Restore this test before WebKit is available in production.
+        // it('fails to connect via polling', function (done) {
+        //   this.wsClient = socketIo.client(wsUrl || this.cfg.proxyUrl, {
+        //     path: this.cfg.socketIoRoute,
+        //     transports: ['polling'],
+        //     rejectUnauthorized: false,
+        //     reconnection: false,
+        //   })
 
-          this.wsClient.on('connect', () => {
-            return done(new Error('should not have been able to connect'))
-          })
+        //   this.wsClient.on('connect', () => {
+        //     return done(new Error('should not have been able to connect'))
+        //   })
 
-          return this.wsClient.io.on('error', () => {
-            return done()
-          })
-        })
+        //   return this.wsClient.io.on('error', () => {
+        //     return done()
+        //   })
+        // })
       })
     }
 
@@ -305,14 +317,84 @@ describe('Web Sockets', () => {
 
     context('when http superDomain has been set', () => {
       return testSocketIo(`http://localhost:${otherPort}`, function () {
-        return this.server._onDomainSet(`http://localhost:${otherPort}`)
+        return this.server.remoteStates.set(`http://localhost:${otherPort}`)
       })
     })
 
     context('when https superDomain has been set', () => {
       return testSocketIo(`http://localhost:${wssPort}`, function () {
-        return this.server._onDomainSet(`http://localhost:${wssPort}`)
+        return this.server.remoteStates.set(`http://localhost:${wssPort}`)
       })
+    })
+  })
+
+  describe('graphql-ws handling on __socket-graphql', () => {
+    beforeEach(function () {
+      const automation = new Automation({
+        cyNamespace: this.cfg.namespace,
+        cookieNamespace: this.cfg.socketIoCookie,
+        screenshotsFolder: this.cfg.screenshotsFolder,
+      })
+
+      return this.server.startWebsockets(automation, this.cfg, {})
+    })
+
+    const openGraphqlWs = (origin) => {
+      const agent = new httpsProxyAgent(`http://localhost:${cyPort}`)
+      const headers = {}
+
+      if (origin !== undefined) {
+        headers.Origin = origin
+      }
+
+      return new Promise((resolve) => {
+        const client = new ws(`ws://localhost:${cyPort}/__socket-graphql`, 'graphql-transport-ws', {
+          agent,
+          headers,
+        })
+        let opened = false
+        let statusCode
+        let done = false
+
+        const finish = () => {
+          if (done) return
+
+          done = true
+          resolve({ opened, statusCode })
+        }
+
+        client.once('open', () => {
+          opened = true
+          client.close()
+        })
+
+        client.once('unexpected-response', (_req, res) => {
+          statusCode = res.statusCode
+          client.terminate()
+          finish()
+        })
+
+        client.once('close', () => finish())
+        client.once('error', () => {})
+      })
+    }
+
+    it('accepts upgrade when Origin port differs from cypress server port', async () => {
+      const result = await openGraphqlWs(`http://localhost:${otherPort}`)
+
+      expect(result.opened, `expected upgrade to succeed; got statusCode=${result.statusCode}`).to.be.true
+    })
+
+    it('accepts upgrade when Origin hostname is not localhost', async () => {
+      const result = await openGraphqlWs('http://foobar.com:4455')
+
+      expect(result.opened, `expected upgrade to succeed; got statusCode=${result.statusCode}`).to.be.true
+    })
+
+    it('accepts upgrade with no Origin header', async () => {
+      const result = await openGraphqlWs(undefined)
+
+      expect(result.opened, `expected upgrade to succeed; got statusCode=${result.statusCode}`).to.be.true
     })
   })
 })

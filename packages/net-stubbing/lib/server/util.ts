@@ -1,58 +1,59 @@
 import _ from 'lodash'
 import Debug from 'debug'
+import mime from 'mime'
 import isHtml from 'is-html'
 import { IncomingMessage } from 'http'
-import {
-  RouteMatcherOptionsGeneric,
-  STRING_MATCHER_FIELDS,
-  DICT_STRING_MATCHER_FIELDS,
+import type {
   BackendStaticResponse,
-} from '../types'
+  GetFixtureFn, CyHttpMessages } from '@packages/network-interception'
+
 import { Readable, PassThrough } from 'stream'
-import type CyServer from '@packages/server'
 import { Socket } from 'net'
-import type { GetFixtureFn } from './types'
 import ThrottleStream from 'throttle'
-import MimeTypes from 'mime-types'
 import type { CypressIncomingRequest } from '@packages/proxy'
 import type { InterceptedRequest } from './intercepted-request'
+import type { SocketBroadcaster } from '@packages/socket'
 import { caseInsensitiveGet, caseInsensitiveHas } from '../util'
 
-// TODO: move this into net-stubbing once cy.route is removed
-import { parseContentType } from '@packages/server/lib/controllers/xhrs'
-import type { CyHttpMessages } from '../external-types'
 import { getEncoding } from 'istextorbinary'
 
 const debug = Debug('cypress:net-stubbing:server:util')
+const htmlLikeRe = /<.+>[\s\S]+<\/.+>/
 
-export function emit (socket: CyServer.Socket, eventName: string, data: object) {
+const isValidJSON = function (text: unknown) {
+  if (_.isObject(text)) {
+    return true
+  }
+
+  try {
+    const o = JSON.parse(text as string)
+
+    return _.isObject(o)
+  } catch (error) {
+    false
+  }
+
+  return false
+}
+
+export function parseContentType (response?: string) {
+  if (isValidJSON(response)) {
+    return mime.getType('json')
+  }
+
+  if (response && htmlLikeRe.test(response)) {
+    return mime.getType('html')
+  }
+
+  return mime.getType('text')
+}
+
+export function emit (socket: SocketBroadcaster, eventName: string, data: object) {
   if (debug.enabled) {
     debug('sending event to driver %o', { eventName, data: _.chain(data).cloneDeep().omit('res.body').value() })
   }
 
   socket.toDriver('net:stubbing:event', eventName, data)
-}
-
-export function getAllStringMatcherFields (options: RouteMatcherOptionsGeneric<any>) {
-  return _.concat(
-    _.filter(STRING_MATCHER_FIELDS, _.partial(_.has, options)),
-    // add the nested DictStringMatcher values to the list of fields
-    _.flatten(
-      _.filter(
-        DICT_STRING_MATCHER_FIELDS.map((field) => {
-          const value = options[field]
-
-          if (value) {
-            return _.keys(value).map((key) => {
-              return `${field}.${key}`
-            })
-          }
-
-          return ''
-        }),
-      ),
-    ),
-  )
 }
 
 /**
@@ -120,13 +121,13 @@ export async function setResponseFromFixture (getFixtureFn: GetFixtureFn, static
     return
   }
 
-  const data = await getFixtureFn(fixture.filePath, { encoding: fixture.encoding || null })
+  const data = await getFixtureFn(fixture.filePath, { encoding: fixture.encoding })
 
   const { headers } = staticResponse
 
   if (!headers || !caseInsensitiveGet(headers, 'content-type')) {
     // attempt to detect mimeType based on extension, fall back to regular cy.fixture inspection otherwise
-    const mimeType = MimeTypes.lookup(fixture.filePath) || parseContentType(data)
+    const mimeType = mime.getType(fixture.filePath) || parseContentType(data)
 
     _.set(staticResponse, 'headers.content-type', mimeType)
   }
@@ -218,8 +219,10 @@ function wait (fn, ms) {
 
 export function mergeDeletedHeaders (before: CyHttpMessages.BaseMessage, after: CyHttpMessages.BaseMessage) {
   for (const k in before.headers) {
-    // a header was deleted from `after` but was present in `before`, delete it in `before` too
-    !after.headers[k] && delete before.headers[k]
+    // a header was deleted from `after` but was present in `before`, delete it in `before` too.
+    // only treat `undefined` (deleted via `delete` or explicitly set to `undefined`) as removal -
+    // an empty string is a valid header value and must be preserved (#25767)
+    after.headers[k] === undefined && delete before.headers[k]
   }
 }
 

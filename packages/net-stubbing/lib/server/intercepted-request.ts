@@ -8,11 +8,13 @@ import type {
 import type {
   NetEvent,
   Subscription,
-} from '../types'
-import type { BackendRoute, NetStubbingState } from './types'
+  BackendStaticResponse,
+  BackendRoute } from '@packages/network-interception'
+import type { NetStubbingState } from './types'
+import { planSubscriptions } from '@packages/network-interception'
+import * as errors from '@packages/errors'
 import { emit, sendStaticResponse } from './util'
-import type CyServer from '@packages/server'
-import type { BackendStaticResponse } from '../internal-types'
+import type { SocketBroadcaster } from '@packages/socket'
 
 export class InterceptedRequest {
   id: string
@@ -39,22 +41,18 @@ export class InterceptedRequest {
   continueResponse?: (newResStream?: Readable) => void
   req: CypressIncomingRequest
   res: CypressOutgoingResponse
-  matchingRoutes: BackendRoute[]
   state: NetStubbingState
-  socket: CyServer.Socket
+  socket: SocketBroadcaster
 
-  constructor (opts: Pick<InterceptedRequest, 'req' | 'res' | 'continueRequest' | 'onError' | 'onResponse' | 'state' | 'socket' | 'matchingRoutes'>) {
+  constructor (opts: Pick<InterceptedRequest, 'req' | 'res' | 'continueRequest' | 'onError' | 'onResponse' | 'state' | 'socket'>) {
     this.id = _.uniqueId('interceptedRequest')
     this.req = opts.req
     this.res = opts.res
     this.continueRequest = opts.continueRequest
     this.onError = opts.onError
     this._onResponse = opts.onResponse
-    this.matchingRoutes = opts.matchingRoutes
     this.state = opts.state
     this.socket = opts.socket
-
-    this.addDefaultSubscriptions()
   }
 
   onResponse = (incomingRes: IncomingMessage, resStream: Readable) => {
@@ -67,28 +65,23 @@ export class InterceptedRequest {
     this._onResponse(incomingRes, resStream)
   }
 
-  private addDefaultSubscriptions () {
+  addDefaultSubscriptions () {
     if (this.subscriptionsByRoute.length) {
       throw new Error('cannot add default subscriptions to non-empty array')
     }
 
-    for (const route of this.matchingRoutes) {
-      const subscriptionsByRoute = {
-        routeId: route.id,
-        immediateStaticResponse: route.staticResponse,
-        subscriptions: [{
-          eventName: 'before:request',
-          await: !!route.hasInterceptor,
-          routeId: route.id,
-        },
-        ...(['response:callback', 'after:response', 'network:error'].map((eventName) => {
-          // notification-only default event
-          return { eventName, await: false, routeId: route.id }
-        }))],
-      }
-
-      this.subscriptionsByRoute.push(subscriptionsByRoute)
+    if (!this.req.matchingRoutes) {
+      return
     }
+
+    this.subscriptionsByRoute = planSubscriptions({
+      matchingRoutes: this.req.matchingRoutes,
+      isSyncRequest: this.req.isSyncRequest,
+      proxiedUrl: this.req.proxiedUrl,
+      onSyncInterceptSkipped: (url) => {
+        errors.warning('SYNCHRONOUS_XHR_REQUEST_NOT_INTERCEPTED', url)
+      },
+    })
   }
 
   static resolveEventHandler (state: NetStubbingState, options: { eventId: string, changedData: any, stopPropagation: boolean }) {
@@ -156,7 +149,9 @@ export class InterceptedRequest {
         // https://github.com/cypress-io/cypress/issues/17139
         // Routes should be counted before they're sent.
         if (eventName === 'before:request') {
-          const route = this.matchingRoutes.find(({ id }) => id === subscription.routeId) as BackendRoute
+          const route = this.req.matchingRoutes?.find(({ id }) => id === subscription.routeId) as BackendRoute
+
+          if (!route) throw new Error(`No route by ID ${subscription.routeId} for ${eventName}`)
 
           route.matches++
 
@@ -197,8 +192,11 @@ export class InterceptedRequest {
           }
         }
 
-        if (eventName === 'before:request') {
-          if (immediateStaticResponse) {
+        if (eventName === 'before:request' && immediateStaticResponse) {
+          // Since StaticResponse is conflated with InterceptOptions, only send an immediate response if there are keys other than `log`.
+          const hasOnlyLog = _.isEqual(Object.keys(immediateStaticResponse), ['log'])
+
+          if (!hasOnlyLog) {
             await sendStaticResponse(this, immediateStaticResponse)
 
             return data

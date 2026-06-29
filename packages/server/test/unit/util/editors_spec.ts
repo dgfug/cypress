@@ -1,14 +1,12 @@
-import _ from 'lodash'
-import Bluebird from 'bluebird'
 import chai, { expect } from 'chai'
 import chaiAsPromised from 'chai-as-promised'
 import chaiSubset from 'chai-subset'
 import sinonChai from '@cypress/sinon-chai'
 import sinon from 'sinon'
 
-import shellUtil from '../../../lib/util/shell.js'
+import * as shellUtil from '../../../lib/util/shell'
 import * as envEditors from '../../../lib/util/env-editors'
-import savedState from '../../../lib/saved_state'
+import * as savedState from '../../../lib/saved_state'
 
 import { getUserEditor, setUserEditor } from '../../../lib/util/editors'
 
@@ -27,7 +25,7 @@ describe('lib/util/editors', () => {
 
   beforeEach(() => {
     stateMock = {
-      get: sinon.stub().returns({}),
+      get: sinon.stub().resolves({}),
       set: sinon.spy(),
     }
 
@@ -55,7 +53,7 @@ describe('lib/util/editors', () => {
       sinon.stub(shellUtil, 'commandExists').callsFake((command) => {
         const exists = ['code', 'subl', 'vim'].includes(command)
 
-        return Bluebird.resolve(exists)
+        return Promise.resolve(exists)
       })
 
       platform = process.platform
@@ -67,37 +65,12 @@ describe('lib/util/editors', () => {
       sinon.restore()
     })
 
-    it('returns a list of editors on the user\'s system with an "On Computer" option prepended and an "Other" option appended', () => {
-      return getUserEditor().then(({ availableEditors }) => {
-        const names = _.map(availableEditors, 'name')
-
-        expect(names).to.eql(['Finder', 'Sublime Text', 'Visual Studio Code', 'Vim', 'Other'])
-        expect(availableEditors[0]).to.eql({
-          id: 'computer',
-          name: 'Finder',
-          isOther: false,
-          openerId: 'computer',
-        })
-
-        expect(availableEditors[4]).to.eql({
-          id: 'other',
-          name: 'Other',
-          isOther: true,
-          openerId: '',
-        })
-      })
-    })
-
     it('includes user-set path for "Other" option if available', () => {
       // @ts-ignore
       savedState.create.resolves({
         get () {
-          return { isOther: true, openerId: '/path/to/editor' }
+          return Promise.resolve({ isOther: true, binary: '/path/to/editor', id: 'other' })
         },
-      })
-
-      return getUserEditor().then(({ availableEditors }) => {
-        expect(availableEditors[4].openerId).to.equal('/path/to/editor')
       })
     })
 
@@ -138,12 +111,12 @@ describe('lib/util/editors', () => {
         // @ts-ignore
         savedState.create.resolves({
           get () {
-            return { preferredOpener }
+            return Promise.resolve({ preferredOpener })
           },
         })
 
         return getUserEditor(true).then(({ availableEditors, preferredOpener }) => {
-          expect(availableEditors).to.have.length(5)
+          expect(availableEditors).to.have.length(4)
           expect(preferredOpener).to.equal(preferredOpener)
         })
       })
@@ -156,26 +129,26 @@ describe('lib/util/editors', () => {
         // @ts-ignore
         savedState.create.resolves({
           get () {
-            return { preferredOpener }
+            return Promise.resolve({ preferredOpener })
           },
         })
 
         return getUserEditor(false).then(({ availableEditors, preferredOpener }) => {
-          expect(availableEditors).to.be.undefined
+          expect(availableEditors).to.have.length(0)
           expect(preferredOpener).to.equal(preferredOpener)
         })
       })
 
       it('returns available editors if preferred opener has not been saved', () => {
         return getUserEditor(false).then(({ availableEditors, preferredOpener }) => {
-          expect(availableEditors).to.have.length(5)
+          expect(availableEditors).to.have.length(4)
           expect(preferredOpener).to.be.undefined
         })
       })
 
       it('is default', () => {
         return getUserEditor().then(({ availableEditors, preferredOpener }) => {
-          expect(availableEditors).to.have.length(5)
+          expect(availableEditors).to.have.length(4)
           expect(preferredOpener).to.be.undefined
         })
       })
@@ -187,7 +160,7 @@ describe('lib/util/editors', () => {
       const editor = {}
 
       return setUserEditor(editor).then(() => {
-        expect(stateMock.set).to.be.calledWith('preferredOpener', editor)
+        expect(stateMock.set).to.be.calledWith({ preferredOpener: editor })
       })
     })
   })

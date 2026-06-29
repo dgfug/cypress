@@ -24,7 +24,10 @@
     "jsdoc-format": false,
     // for now keep the Cypress NPM module API
     // in its own file for simplicity
-    "no-single-declare-module": false
+    "no-single-declare-module": false,
+    // This is detecting necessary qualifiers as unnecessary
+    "no-unnecessary-qualifier": false,
+    "space-before-function-paren": ["warn", "always"]
   },
   "linterOptions": {
     "exclude": [
@@ -38,7 +41,10 @@
       "./mocha/*",
       "./minimatch/*",
       "./sinon/**/*",
-      "./sinon-chai/*"
+      "./sinon-chai/*",
+      // Copied from net-stubbing and renamed to a declaration file. Since it's not originally
+      // a declaration file, we need to exclude it from linting.
+      "./net-stubbing.d.ts"
     ]
   }
 }

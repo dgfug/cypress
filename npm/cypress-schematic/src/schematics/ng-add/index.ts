@@ -7,32 +7,46 @@ import {
   Rule,
   SchematicContext,
   SchematicsException,
-  template,
+  applyTemplates,
   Tree,
   url,
 } from '@angular-devkit/schematics'
 import { NodePackageInstallTask } from '@angular-devkit/schematics/tasks'
 import { of } from 'rxjs'
 import { concatMap, map } from 'rxjs/operators'
+import { gte as isSemverGte } from 'semver'
 
-import { addPackageJsonDependency, NodeDependencyType } from '../utility/dependencies'
+import { addPackageJsonDependency, NodeDependencyType } from '../utils/dependencies'
 import {
-  getAngularVersion,
+  getAngularJsonValue,
+  getAngularSemverVersion,
   getLatestNodeVersion,
   NodePackage,
-} from '../utility'
+  getDirectoriesAndCreateSpecs,
+} from '../utils'
 import { relative, resolve } from 'path'
-import { JSONFile, JSONPath } from '../utility/jsonFile'
+import { JSONFile, JSONPath } from '../utils/jsonFile'
+
+type HandleFilesType = {
+  projects: any
+  options: any
+  applyPath: string
+  movePath?: string
+  relativeToWorkspacePath: string
+}
 
 export default function (_options: any): Rule {
   return (tree: Tree, _context: SchematicContext) => {
-    _options = { ..._options, __version__: getAngularVersion(tree) }
+    _options = { ..._options, __version__: getAngularSemverVersion(tree) }
 
     return chain([
       updateDependencies(),
-      addCypressFiles(),
+      addCypressCoreFiles(_options),
+      addCypressComponentTestingFiles(_options),
+      addCtSpecs(_options),
       addCypressTestScriptsToPackageJson(),
       modifyAngularJson(_options),
+      addDefaultSchematic(),
     ])(tree, _context)
   }
 }
@@ -46,7 +60,7 @@ function addPropertyToPackageJson (tree: Tree, path: JSONPath, value: JsonValue)
 function updateDependencies (): Rule {
   return (tree: Tree, context: SchematicContext): any => {
     context.logger.debug('Updating dependencies...')
-    context.addTask(new NodePackageInstallTask())
+    context.addTask(new NodePackageInstallTask({ allowScripts: true }))
 
     const addDependencies = of('cypress').pipe(
       concatMap((packageName: string) => getLatestNodeVersion(packageName)),
@@ -79,33 +93,89 @@ function addCypressTestScriptsToPackageJson (): Rule {
   }
 }
 
-function addCypressFiles (): Rule {
+function handleFiles (tree: Tree, context: SchematicContext, { projects, options, applyPath, movePath, relativeToWorkspacePath }: HandleFilesType): any {
+  return chain(
+    Object.keys(projects).map((name) => {
+      const project = projects[name]
+      const projectPath = resolve(getSystemPath(normalize(project.root)))
+      const workspacePath = resolve(getSystemPath(normalize('')))
+
+      const relativeToWorkspace = relative(`${projectPath}${relativeToWorkspacePath}`, workspacePath)
+
+      const baseUrl = getBaseUrl(project)
+
+      return mergeWith(
+        apply(url(applyPath), [
+          move(movePath ? `${project.root}${movePath}` : project.root),
+          applyTemplates({
+            ...options,
+            ...strings,
+            root: project.root ? `${project.root}/` : project.root,
+            baseUrl,
+            relativeToWorkspace,
+          }),
+        ]),
+      )
+    }),
+  )(tree, context)
+}
+
+function addCypressCoreFiles (options: any): Rule {
   return (tree: Tree, context: SchematicContext) => {
     context.logger.debug('Adding cypress files')
     const angularJsonValue = getAngularJsonValue(tree)
     const { projects } = angularJsonValue
 
-    return chain(
+    return handleFiles(tree, context, {
+      projects,
+      options,
+      applyPath: './files-core',
+      relativeToWorkspacePath: `/`,
+    })
+  }
+}
+
+function addCypressComponentTestingFiles (options: any): Rule {
+  return (tree: Tree, context: SchematicContext) => {
+    if (options.component) {
+      context.logger.debug('Adding cypress component testing files')
+      const angularJsonValue = getAngularJsonValue(tree)
+      const { projects } = angularJsonValue
+
+      let applyPath = './files-ct'
+
+      try {
+        // if using Angular 21 or greater, we need to use the cypress/angular-zoneless mount function, which was introduced in Cypress 15.8.0
+        // and will likely be the default in the future in Cypress 16
+        applyPath = isSemverGte(options.__version__, '21.0.0') ? './files-ct-zoneless' : './files-ct'
+      } catch (error) {
+        context.logger.debug('Error checking Angular version', error)
+      }
+
+      return handleFiles(tree, context, {
+        projects,
+        options,
+        applyPath,
+        movePath: '/cypress/support',
+        relativeToWorkspacePath: `/cypress`,
+      })
+    }
+  }
+}
+
+function addCtSpecs (options: any): Rule {
+  return (tree: Tree) => {
+    if (options.addCtSpecs) {
+      const angularJsonValue = getAngularJsonValue(tree)
+      const { projects } = angularJsonValue
+
       Object.keys(projects).map((name) => {
         const project = projects[name]
-        const projectPath = resolve(getSystemPath(normalize(project.root)))
-        const workspacePath = resolve(getSystemPath(normalize('')))
-        const relativeToWorkspace = relative(`${projectPath}/cypress`, workspacePath)
-        const baseUrl = getBaseUrl(project)
+        const appPath = `${project.root}/${project.sourceRoot}/${project.prefix}`
 
-        return mergeWith(
-          apply(url('./files'), [
-            move(project.root),
-            template({
-              ...strings,
-              root: project.root ? `${project.root}/` : project.root,
-              baseUrl,
-              relativeToWorkspace,
-            }),
-          ]),
-        )
-      }),
-    )(tree, context)
+        return getDirectoriesAndCreateSpecs({ tree, appPath })
+      })
+    }
   }
 }
 
@@ -129,24 +199,24 @@ function addNewCypressCommands (
   runJson: JsonObject,
   openJson: JsonObject,
   e2eJson: JsonObject,
-  e2eUpdate: boolean,
+  e2e: boolean,
+  componentJson: JsonObject,
+  component: boolean,
 ) {
   const projectArchitectJson = angularJsonVal['projects'][project]['architect']
 
   projectArchitectJson['cypress-run'] = runJson
   projectArchitectJson['cypress-open'] = openJson
 
-  if (e2eUpdate || !projectArchitectJson['e2e']) {
+  if (component) {
+    projectArchitectJson['ct'] = componentJson
+  }
+
+  if (e2e || !projectArchitectJson['e2e']) {
     projectArchitectJson['e2e'] = e2eJson
   }
 
   return tree.overwrite('./angular.json', JSON.stringify(angularJsonVal, null, 2))
-}
-
-function getAngularJsonValue (tree: Tree) {
-  const angularJson = new JSONFile(tree, './angular.json')
-
-  return angularJson.get([]) as any
 }
 
 function modifyAngularJson (options: any): Rule {
@@ -195,16 +265,29 @@ function modifyAngularJson (options: any): Rule {
           },
         }
 
-        const configFile = projects[project].root
-          ? `${projects[project].root}/cypress.json`
-          : null
+        const componentJson = {
+          builder,
+          options: {
+            devServerTarget: `${project}:serve`,
+            watch: true,
+            headless: false,
+            testingType: 'component',
+          },
+          configurations: {
+            development: {
+              devServerTarget: `${project}:serve:development`,
+            },
+          },
+        }
+
+        const configFile = getCypressConfigFile(angularJsonVal, project)
 
         if (configFile) {
           Object.assign(runJson.options, { configFile })
           Object.assign(openJson.options, { configFile })
         }
 
-        if (options.e2eUpdate) {
+        if (options.e2e) {
           context.logger.debug(`Replacing e2e command with cypress-run in angular.json`)
           removeE2ELinting(tree, angularJsonVal, project)
         }
@@ -222,7 +305,9 @@ function modifyAngularJson (options: any): Rule {
           runJson,
           openJson,
           e2eJson,
-          options.e2eUpdate,
+          options.e2e,
+          componentJson,
+          options.component,
         )
       })
     } else {
@@ -231,6 +316,44 @@ function modifyAngularJson (options: any): Rule {
 
     return tree
   }
+}
+
+function addDefaultSchematic (): Rule {
+  return (tree: Tree, _: SchematicContext) => {
+    if (tree.exists('./angular.json')) {
+      const angularJsonVal = getAngularJsonValue(tree)
+      const angularSchematic = '@schematics/angular'
+      const cli = {
+        ...angularJsonVal.cli,
+        schematicCollections: ['@cypress/schematic', ...angularJsonVal?.cli?.schematicCollections ?? []],
+      }
+
+      if (cli.schematicCollections.indexOf('@schematics/angular') === -1) {
+        cli.schematicCollections.push(angularSchematic)
+      }
+
+      return tree.overwrite(
+        './angular.json',
+        JSON.stringify({
+          ...angularJsonVal,
+          cli,
+        }, null, 2),
+      )
+    }
+
+    throw new SchematicsException('angular.json not found')
+  }
+}
+
+export const getCypressConfigFile = (angularJsonVal: any, projectName: string) => {
+  const project = angularJsonVal.projects[projectName]
+  const tsConfig = project?.architect?.lint?.options?.tsConfig
+
+  if (project.root) {
+    return `${project.root}/cypress.config.${tsConfig ? 'ts' : 'js'}`
+  }
+
+  return null
 }
 
 export const addCypressTsConfig = (tree: Tree, angularJsonVal: any, projectName: string) => {

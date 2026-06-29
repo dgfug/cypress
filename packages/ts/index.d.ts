@@ -1,53 +1,47 @@
 // missing type definitions for libraries
-// https://glebbahmutov.com/blog/trying-typescript/#manual-types-for-3rd-party-libraries
 
-declare module '@cypress/get-windows-proxy' {
-  type ProxyConfig = {
-    httpProxy: string
-    noProxy: string
-  }
-  function getWindowsProxy(): Optional<ProxyConfig>
-  export = getWindowsProxy
-}
+/// <reference path="typedefs/cypress-get-windows-proxy.d.ts" />
+/// <reference path="typedefs/cypress-request-promise.d.ts" />
 
 declare module 'http' {
-import { Socket } from 'net'
-import { Url } from 'url'
+  import { Socket } from 'net'
+  import { Url } from 'url'
+  import { Duplex } from 'stream'
 
     type SocketCallback = (err: Optional<Error>, sock: Optional<Socket>) => void
 
-  interface Agent {
-    addRequest(req: ClientRequest, options: RequestOptions): void
-    createSocket(req: ClientRequest, options: RequestOptions, cb: SocketCallback): void
-    createConnection(options: RequestOptions, cb: Optional<SocketCallback>): void
-    protocol: 'http:' | 'https:' | string
-  }
+    interface Agent {
+      addRequest(req: ClientRequest, options: RequestOptions): void
+      createSocket(req: ClientRequest, options: RequestOptions, cb: SocketCallback): void
+      createConnection(options: RequestOptions, callback?: ((err: Error | null, stream: Duplex) => void) | undefined): Duplex | null | undefined
+      protocol: 'http:' | 'https:' | string
+    }
 
-  interface ClientRequest {
-    _header?: { [key: string]: string }
-    _implicitHeader: () => void
-    output: string[]
-    agent: Agent
-    insecureHTTPParser: boolean
-    maxHeaderSize?: number
-  }
+    interface ClientRequest {
+      _header?: { [key: string]: string }
+      _implicitHeader: () => void
+      output: string[]
+      agent: Agent
+      insecureHTTPParser: boolean
+      maxHeaderSize?: number
+    }
 
-  interface RequestOptions extends ClientRequestArgs {
-    _agentKey: Optional<symbol>
-    host: string
-    href: string
-    port: number
-    proxy: Optional<string>
-    servername: Optional<string>
-    socket: Optional<Socket>
-    uri: Url
-  }
+    interface RequestOptions extends ClientRequestArgs {
+      _agentKey: Optional<symbol>
+      host: string
+      href: string
+      port: number
+      proxy: Optional<string>
+      servername: Optional<string>
+      socket: Optional<Socket>
+      uri?: Url
+    }
 
-  interface OutgoingMessage {
-    destroy(error?: Error): void
-  }
+    interface OutgoingMessage {
+      destroy(error?: Error): this
+    }
 
-  export const CRLF: string
+    export const CRLF: string
 }
 
 declare module 'https' {

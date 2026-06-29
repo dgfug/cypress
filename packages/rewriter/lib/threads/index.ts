@@ -21,7 +21,7 @@ const _debugOpts = !debug.enabled ? _.noop : (opts: RewriteOpts) => {
 // because it does not require importing @packages/ts like development does.
 // this has a huge performance impact, bringing the `responsiveMs` for threads
 // from ~1s to about ~300ms on my system
-const WORKER_FILENAME = process.env.CYPRESS_INTERNAL_ENV === 'production' ? 'worker.js' : 'worker-shim.js'
+const WORKER_FILENAME = process.env.CYPRESS_INTERNAL_ENV === 'production' ? 'worker.js' : '../../script/worker-shim.js'
 
 const WORKER_PATH = path.join(__dirname, WORKER_FILENAME)
 
@@ -121,7 +121,7 @@ export function createInitialWorkers () {
 
 // try to cleanly shut down worker threads to avoid SIGABRT in Electron
 // @see https://github.com/electron/electron/issues/23366
-export function shutdownWorker (workerInfo: WorkerInfo) {
+function shutdownWorker (workerInfo: WorkerInfo) {
   const { thread } = workerInfo
 
   return new Bluebird((resolve) => {

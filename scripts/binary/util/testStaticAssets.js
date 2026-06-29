@@ -47,19 +47,60 @@ const testStaticAssets = async (buildResourcePath) => {
         ['-ms-', 20],
       ],
     }),
-
     testPackageStaticAssets({
-      assetGlob: `${buildResourcePath}/packages/desktop-gui/dist/index.html`,
+      assetGlob: `${buildResourcePath}/packages/socket/node_modules/socket.io-parser/build/cjs/binary.js`,
+      badStrings: [
+        'pack.data = _deconstructPacket(packetData, buffers);',
+      ],
       goodStrings: [
-        // make sure webpack is run with NODE_ENV=production
-        `window.env = 'production'`,
+        'pack.data = _deconstructPacket(packetData, buffers, [], new WeakMap());',
       ],
     }),
     testPackageStaticAssets({
-      assetGlob: `${buildResourcePath}/packages/desktop-gui/dist/app.js`,
+      assetGlob: `${buildResourcePath}/packages/socket/node_modules/engine.io-parser/build/cjs/encodePacket.browser.js`,
+      badStrings: [
+        '(data instanceof ArrayBuffer || isView(data))',
+      ],
       goodStrings: [
-        // make sure webpack is run with NODE_ENV=production
-        'react.production.min.js',
+        'This extra check is made because the "instanceof ArrayBuffer" check does not work',
+        '(data instanceof ArrayBuffer || isArrayBuffer(data) || isView(data))',
+      ],
+    }),
+    testPackageStaticAssets({
+      assetGlob: `${buildResourcePath}/packages/server/node_modules/geckodriver/dist/install.js`,
+      badStrings: [
+        'await download()',
+      ],
+      goodStrings: [
+        'download()',
+      ],
+    }),
+    testPackageStaticAssets({
+      assetGlob: `${buildResourcePath}/packages/server/node_modules/edgedriver/dist/install.js`,
+      badStrings: [
+        'await download()',
+      ],
+      goodStrings: [
+        'download()',
+      ],
+    }),
+    testPackageStaticAssets({
+      assetGlob: `${buildResourcePath}/packages/server/node_modules/@wdio/protocols/build/index.js`,
+      badStrings: [
+        'name: "addon"',
+        'description: "base64 string of the add on file"',
+      ],
+      goodStrings: [
+        'name: "path"',
+        'description: "path to the extension"',
+      ],
+    }),
+    testPackageStaticAssets({
+      assetGlob: `${buildResourcePath}/packages/server/node_modules/@wdio/utils/build/node.js`,
+      badStrings: [],
+      goodStrings: [
+        `log.setLevel(debugModule.enabled('cypress-verbose:server:browsers:webdriver') ? 'info' : 'silent')`,
+        `log2.setLevel(debugModule.enabled('cypress-verbose:server:browsers:webdriver') ? 'info' : 'silent')`,
       ],
     }),
   ])

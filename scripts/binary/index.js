@@ -4,30 +4,36 @@ const cwd = process.cwd()
 const path = require('path')
 const _ = require('lodash')
 const os = require('os')
-const gift = require('gift')
+const simpleGit = require('simple-git')
 const chalk = require('chalk')
 const Promise = require('bluebird')
 const minimist = require('minimist')
 const la = require('lazy-ass')
 const check = require('check-more-types')
 const debug = require('debug')('cypress:binary')
-const questionsRemain = require('@cypress/questions-remain')
-const R = require('ramda')
 const rp = require('@cypress/request-promise')
 
 const zip = require('./zip')
 const ask = require('./ask')
-const bump = require('./bump')
 const meta = require('./meta')
 const build = require('./build')
 const upload = require('./upload')
+const questionsRemain = require('./util/questions-remain')
 const uploadUtils = require('./util/upload')
-const { uploadNpmPackage } = require('./upload-npm-package')
-const { uploadUniqueBinary } = require('./upload-unique-binary')
+const { uploadArtifactToS3 } = require('./upload-build-artifact')
 const { moveBinaries } = require('./move-binaries')
+const { exec } = require('child_process')
+const xvfb = require('../../cli/lib/exec/xvfb').default
+const smoke = require('./smoke')
+const { needsSandbox } = require('../../cli/lib/tasks/verify')
+const execa = require('execa')
 
-// initialize on existing repo
-const repo = Promise.promisifyAll(gift(cwd))
+const log = function (msg) {
+  const time = new Date()
+  const timeStamp = time.toLocaleTimeString()
+
+  console.log(timeStamp, chalk.yellow(msg), chalk.blue(meta.PLATFORM))
+}
 
 const success = (str) => {
   return console.log(chalk.bgGreen(` ${chalk.black(str)} `))
@@ -37,7 +43,7 @@ const fail = (str) => {
   return console.log(chalk.bgRed(` ${chalk.black(str)} `))
 }
 
-const zippedFilename = R.always(upload.zipName)
+const zippedFilename = () => upload.zipName
 
 // goes through the list of properties and asks relevant question
 // resolves with all relevant options set
@@ -55,14 +61,39 @@ const askMissingOptions = function (properties = []) {
   return questionsRemain(pickedQuestions)
 }
 
+async function testExecutableVersion (buildAppExecutable, version) {
+  log('#testVersion')
+
+  console.log('testing built app executable version')
+  console.log(`by calling: ${buildAppExecutable} --version`)
+
+  const args = ['--version']
+
+  if (needsSandbox()) {
+    args.push('--no-sandbox')
+  }
+
+  const result = await execa(buildAppExecutable, args)
+
+  la(result.stdout, 'missing output when getting built version', result)
+
+  console.log('built app version', result.stdout)
+  la(
+    result.stdout.trim() === version.trim(),
+    `different version reported: '${result.stdout.trim()}' from input version to build '${version.trim()}'`,
+  )
+
+  console.log('✅ using --version on the Cypress binary works')
+}
+
 // hack for @packages/server modifying cwd
 process.chdir(cwd)
 
 const commitVersion = function (version) {
   const msg = `release ${version} [skip ci]`
 
-  return repo.commitAsync(msg, {
-    'allow-empty': true,
+  return simpleGit.commit(msg, {
+    '--allow-empty': null,
   })
 }
 
@@ -71,12 +102,7 @@ const deploy = {
 
   parseOptions (argv) {
     const opts = minimist(argv, {
-      boolean: ['skip-clean'],
-      default: {
-        'skip-clean': false,
-      },
       alias: {
-        skipClean: 'skip-clean',
         zip: ['zipFile', 'zip-file', 'filename'],
       },
     })
@@ -85,47 +111,12 @@ const deploy = {
       opts.runTests = false
     }
 
-    if (!opts.platform && (os.platform() === meta.platforms.linux)) {
-      // only can build Linux on Linux
-      opts.platform = meta.platforms.linux
-    }
-
-    // windows aliases
-    if ((opts.platform === 'win32') || (opts.platform === 'win') || (opts.platform === 'windows')) {
-      opts.platform = meta.platforms.windows
-    }
-
-    if (!opts.platform && (os.platform() === meta.platforms.windows)) {
-      // only can build Windows binary on Windows platform
-      opts.platform = meta.platforms.windows
-    }
-
-    // be a little bit user-friendly and allow aliased values
-    if (opts.platform === 'mac') {
-      opts.platform = meta.platforms.darwin
-    }
+    if (!opts.platform) opts.platform = os.platform()
 
     debug('parsed command line options')
     debug(opts)
 
     return opts
-  },
-
-  bump () {
-    return ask.whichBumpTask()
-    .then((task) => {
-      switch (task) {
-        case 'run':
-          return bump.runTestProjects()
-        case 'version':
-          return ask.whichVersion(meta.distDir(''))
-          .then((v) => {
-            return bump.version(v)
-          })
-        default:
-          throw new Error('unknown task')
-      }
-    })
   },
 
   release () {
@@ -145,6 +136,9 @@ const deploy = {
         throw err
       })
       .then(() => {
+        return this.checkManifest({ version })
+      })
+      .then(() => {
         return this.checkDownloads({ version })
       })
     }
@@ -153,11 +147,39 @@ const deploy = {
     .then(release)
   },
 
+  checkManifest ({ version }) {
+    const checkManifest = () => {
+      const url = `https://download.cypress.io/desktop.json`
+
+      process.stdout.write(`Checking for ${chalk.yellow(version)} in the manifest at ${chalk.cyan(url)} ... `)
+
+      return rp.get(url)
+      .then((res) => {
+        const manifest = JSON.parse(res)
+
+        return manifest
+      })
+    }
+
+    return checkManifest().then((manifest) => {
+      const versionMatches = manifest.version === version
+
+      process.stdout.write(`${versionMatches ? '✅' : '❌'}\n`)
+
+      if (!versionMatches) {
+        console.log(chalk.red(`\nFound ${manifest.version} in the manifest, but ${version} was requested.`))
+
+        process.exit(1)
+      }
+    })
+  },
+
   checkDownloads ({ version }) {
     const systems = [
       { platform: 'linux', arch: 'x64' },
+      { platform: 'linux', arch: 'arm64' },
       { platform: 'darwin', arch: 'x64' },
-      { platform: 'win32', arch: 'ia32' },
+      { platform: 'darwin', arch: 'arm64' },
       { platform: 'win32', arch: 'x64' },
     ]
 
@@ -236,10 +258,58 @@ const deploy = {
 
     return askMissingOptions(['version', 'platform'])(options)
     .then(() => {
-      debug('building binary: platform %s version %s', options.platform, options.version)
+      console.log('building binary: platform %s version %s', options.platform, options.version)
 
-      return build(options.platform, options.version, options)
+      return build.buildCypressApp(options)
     })
+  },
+
+  package (options) {
+    console.log('#package')
+    if (options == null) {
+      options = this.parseOptions(process.argv)
+    }
+
+    debug('parsed build options %o', options)
+
+    return askMissingOptions(['version', 'platform'])(options)
+    .then(() => {
+      console.log('packaging binary: platform %s version %s', options.platform, options.version)
+
+      return build.packageElectronApp(options)
+    })
+  },
+
+  async smoke (options) {
+    console.log('#smoke')
+
+    if (options == null) {
+      options = this.parseOptions(process.argv)
+    }
+
+    debug('parsed build options %o', options)
+
+    await askMissingOptions(['version'])(options)
+
+    // runSmokeTests
+    let usingXvfb = xvfb.isNeeded()
+
+    try {
+      if (usingXvfb) {
+        await xvfb.start()
+      }
+
+      log(`#testExecutableVersion ${meta.buildAppExecutable()}`)
+      await testExecutableVersion(meta.buildAppExecutable(), options.version)
+
+      const executablePath = meta.buildAppExecutable()
+
+      await smoke.test(executablePath, meta.buildAppDir())
+    } finally {
+      if (usingXvfb) {
+        await xvfb.stop()
+      }
+    }
   },
 
   zip (options) {
@@ -259,18 +329,11 @@ const deploy = {
     })
   },
 
-  // upload Cypress NPM package file
-  'upload-npm-package' (args = process.argv) {
-    console.log('#packageUpload')
+  // upload Cypress binary or NPM Package zip file under unique hash
+  'upload-build-artifact' (args = process.argv) {
+    console.log('#uploadBuildArtifact')
 
-    return uploadNpmPackage(args)
-  },
-
-  // upload Cypress binary zip file under unique hash
-  'upload-unique-binary' (args = process.argv) {
-    console.log('#uniqueBinaryUpload')
-
-    return uploadUniqueBinary(args)
+    return uploadArtifactToS3(args)
   },
 
   // uploads a single built Cypress binary ZIP file
@@ -295,10 +358,21 @@ const deploy = {
       console.log('for platform %s version %s',
         options.platform, options.version)
 
-      return upload.toS3({
-        zipFile: options.zip,
+      const uploadPath = upload.getFullUploadPath({
         version: options.version,
         platform: options.platform,
+        name: upload.zipName,
+      })
+
+      return upload.toS3({
+        file: options.zip,
+        uploadPath,
+      }).then(() => {
+        return uploadUtils.purgeDesktopAppFromCache({
+          version: options.version,
+          platform: options.platform,
+          zipName: options.zip,
+        })
       })
     })
   },
@@ -307,6 +381,22 @@ const deploy = {
     console.log('#moveBinaries')
 
     return moveBinaries(args)
+  },
+
+  // purge all URLs from Cloudflare cache from file
+  'purge-urls' (args = process.argv) {
+    console.log('#purge-urls')
+
+    const options = minimist(args, {
+      string: 'filePath',
+      alias: {
+        filePath: 'f',
+      },
+    })
+
+    la(check.unemptyString(options.filePath), 'missing file path to url list', options)
+
+    return uploadUtils.purgeUrlsFromCloudflareCache(options.filePath)
   },
 
   // purge all platforms of a desktop app for specific version
@@ -342,6 +432,31 @@ const deploy = {
         return this.upload(options)
       })
     })
+  },
+
+  async checkIfBinaryExistsOnCdn (args = process.argv) {
+    console.log('#checkIfBinaryExistsOnCdn')
+
+    const url = await uploadArtifactToS3([...args, '--dry-run', 'true'])
+
+    console.log(`Checking if ${url} exists...`)
+
+    const binaryExists = await rp.head(url)
+    .then(() => true)
+    .catch(() => false)
+
+    if (binaryExists) {
+      console.log('A binary was already built for this operating system and commit hash. Skipping binary build process...')
+      exec('circleci-agent step halt', (_, __, stdout) => {
+        console.log(stdout)
+      })
+
+      return
+    }
+
+    console.log('Binary does not yet exist. Continuing to build binary...')
+
+    return binaryExists
   },
 }
 

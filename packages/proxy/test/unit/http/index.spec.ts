@@ -1,163 +1,566 @@
-import { Http, HttpStages } from '../../../lib/http'
-import { expect } from 'chai'
-import sinon from 'sinon'
+import { describe, expect, it, beforeEach, vi, Mock } from 'vitest'
+import { Http, HttpMiddleware, HttpMiddlewareStacks, HttpStages, ServerCtx, _runStage } from '../../../lib/http'
+import { BrowserPreRequest } from '../../../lib'
+import type CyServer from '@packages/server'
 
 describe('http', function () {
-  context('Http.handle', function () {
-    let config
-    let getRemoteState
-    let middleware
-    let incomingRequest
-    let incomingResponse
-    let error
-    let httpOpts
+  describe('_runStage', function () {
+    it('routes async middleware rejections to onError', async function () {
+      const onError = vi.fn()
+      const asyncMiddleware = vi.fn().mockRejectedValue(new Error('async oops'))
 
-    beforeEach(function () {
-      config = {}
-      getRemoteState = sinon.stub().returns({})
-
-      incomingRequest = sinon.stub()
-      incomingResponse = sinon.stub()
-      error = sinon.stub()
-
-      middleware = {
-        [HttpStages.IncomingRequest]: [incomingRequest],
-        [HttpStages.IncomingResponse]: [incomingResponse],
-        [HttpStages.Error]: [error],
+      const ctx = {
+        req: { method: 'GET', proxiedUrl: 'url' },
+        res: { off: vi.fn(), on: vi.fn(), writableFinished: true },
+        debug: () => {},
+        middleware: {
+          [HttpStages.IncomingRequest]: { asyncMiddleware },
+        },
       }
 
-      httpOpts = { config, getRemoteState, middleware }
+      await _runStage(HttpStages.IncomingRequest, ctx, onError)
+
+      await vi.waitFor(() => {
+        expect(onError).toHaveBeenCalledOnce()
+      })
+
+      expect(onError.mock.calls[0][0].message).toEqual('Internal error while proxying "GET url" in asyncMiddleware:\nasync oops')
     })
 
-    it('calls IncomingRequest stack, then IncomingResponse stack', function () {
-      incomingRequest.callsFake(function () {
-        expect(incomingResponse).to.not.be.called
-        expect(error).to.not.be.called
+    it('propagates stream errors after middleware has called next()', async function () {
+      const onError = vi.fn()
+      const { PassThrough } = await import('stream')
+      const { EventEmitter } = await import('events')
+
+      const res = Object.assign(new EventEmitter(), {
+        off: vi.fn(),
+        on: vi.fn(),
+        writableFinished: false,
+        destroyed: false,
+      })
+
+      const streamMiddleware = vi.fn().mockImplementation(function () {
+        const pt = new PassThrough()
+
+        this.incomingResStream = pt
+        this.makeResStreamPlainText = () => {
+          pt.on('error', this.onError)
+        }
+
+        this.next()
+      })
+
+      const useStreamMiddleware = vi.fn().mockImplementation(function () {
+        this.makeResStreamPlainText()
+        this.incomingResStream.emit('error', new Error('bad gzip'))
+        this.end()
+      })
+
+      const ctx = {
+        req: { method: 'GET', proxiedUrl: 'url' },
+        res,
+        debug: () => {},
+        middleware: {
+          [HttpStages.IncomingResponse]: {
+            streamMiddleware,
+            useStreamMiddleware,
+          },
+        },
+      }
+
+      await _runStage(HttpStages.IncomingResponse, ctx, onError)
+
+      await vi.waitFor(() => {
+        expect(onError).toHaveBeenCalledOnce()
+      })
+
+      expect(onError.mock.calls[0][0].message).toEqual('bad gzip')
+    })
+
+    it('ignores async middleware rejections after next() was called', async function () {
+      const onError = vi.fn()
+      let rejectLate: (err: Error) => void
+
+      const asyncMiddleware = vi.fn().mockImplementation(function () {
+        this.next()
+
+        return new Promise((_resolve, reject) => {
+          rejectLate = reject
+        })
+      })
+
+      const ctx = {
+        req: { method: 'GET', proxiedUrl: 'url' },
+        res: { off: vi.fn(), on: vi.fn(), writableFinished: true },
+        debug: () => {},
+        middleware: {
+          [HttpStages.IncomingRequest]: { asyncMiddleware },
+        },
+      }
+
+      await _runStage(HttpStages.IncomingRequest, ctx, onError)
+
+      rejectLate!(new Error('late async rejection'))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      expect(onError).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Http.handle', function () {
+    let config: CyServer.Config & Cypress.Config
+    let middleware: HttpMiddlewareStacks
+    let incomingRequest: Mock<HttpMiddleware<any>>
+    let incomingResponse: Mock<HttpMiddleware<any>>
+    let error: Mock
+    let httpOpts: ServerCtx & { middleware?: HttpMiddlewareStacks }
+    let on: Mock
+    let off: Mock
+
+    beforeEach(function () {
+      config = {} as CyServer.Config & Cypress.Config
+      incomingRequest = vi.fn()
+      incomingResponse = vi.fn()
+      error = vi.fn()
+      on = vi.fn()
+      off = vi.fn()
+
+      middleware = {
+        [HttpStages.IncomingRequest]: { incomingRequest },
+        [HttpStages.IncomingResponse]: { incomingResponse },
+        [HttpStages.Error]: { error },
+      }
+
+      httpOpts = { config, middleware, request: { rp: vi.fn() } } as ServerCtx & { middleware?: HttpMiddlewareStacks } & { request: { rp: Mock } }
+    })
+
+    it('calls IncomingRequest stack, then IncomingResponse stack', async function () {
+      incomingRequest.mockImplementation(function () {
+        expect(incomingResponse).not.toHaveBeenCalled()
+        expect(error).not.toHaveBeenCalled()
 
         this.incomingRes = {}
 
         this.end()
       })
 
-      incomingResponse.callsFake(function () {
-        expect(incomingRequest).to.be.calledOnce
-        expect(error).to.not.be.called
+      incomingResponse.mockImplementation(function () {
+        expect(incomingRequest).toHaveBeenCalledOnce()
+        expect(error).not.toHaveBeenCalled()
 
         this.end()
       })
 
-      return new Http(httpOpts)
-      .handle({}, {})
-      .then(function () {
-        expect(incomingRequest, 'incomingRequest').to.be.calledOnce
-        expect(incomingResponse, 'incomingResponse').to.be.calledOnce
-        expect(error).to.not.be.called
-      })
+      // @ts-expect-error
+      await new Http(httpOpts).handleHttpRequest({}, { on, off })
+
+      expect(incomingRequest, 'incomingRequest').toHaveBeenCalledOnce()
+      expect(incomingResponse, 'incomingResponse').toHaveBeenCalledOnce()
+      expect(error).not.toHaveBeenCalled()
+      expect(on).toHaveBeenCalledOnce()
+      expect(off).toHaveBeenCalledTimes(2)
     })
 
-    it('moves to Error stack if err in IncomingRequest', function () {
-      incomingRequest.throws(new Error('oops'))
+    it('moves to Error stack if err in IncomingRequest', async function () {
+      incomingRequest.mockImplementation(() => {
+        throw new Error('oops')
+      })
 
-      error.callsFake(function () {
-        expect(this.error.message).to.eq('oops')
+      error.mockImplementation(function () {
+        expect(this.error.message).toEqual('Internal error while proxying "GET url" in incomingRequest:\noops')
         this.end()
       })
 
-      return new Http(httpOpts)
-      .handle({}, {})
-      .then(function () {
-        expect(incomingRequest).to.be.calledOnce
-        expect(incomingResponse).to.not.be.called
-        expect(error).to.be.calledOnce
+      // @ts-expect-error
+      await new Http(httpOpts).handleHttpRequest({ method: 'GET', proxiedUrl: 'url' }, { on, off })
+      expect(incomingRequest).toHaveBeenCalledOnce()
+      expect(incomingResponse).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledOnce()
+      expect(on).not.toHaveBeenCalled()
+      expect(off).toHaveBeenCalledTimes(3)
+    })
+
+    it('creates fake pending browser pre request', async function () {
+      incomingRequest.mockImplementation(function () {
+        this.req.browserPreRequest = {
+          requestId: '1234',
+          errorHandled: false,
+        }
+
+        this.res.destroyed = false
+
+        throw new Error('oops')
+      })
+
+      error.mockImplementation(function () {
+        expect(this.error.message).toEqual('Internal error while proxying "GET url" in incomingRequest:\noops')
+        this.end()
+      })
+
+      const http = new Http(httpOpts)
+
+      http.addPendingBrowserPreRequest = vi.fn()
+
+      // @ts-expect-error
+      await http.handleHttpRequest({ method: 'GET', proxiedUrl: 'url' }, { on, off })
+      expect(incomingRequest).toHaveBeenCalledOnce()
+      expect(incomingResponse).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledOnce()
+      expect(http.addPendingBrowserPreRequest).toHaveBeenCalledExactlyOnceWith({
+        requestId: '1234-retry-1',
+        errorHandled: false,
       })
     })
 
-    it('moves to Error stack if err in IncomingResponse', function () {
-      incomingRequest.callsFake(function () {
+    it('ensures not to create fake pending browser pre requests on multiple errors', async function () {
+      incomingRequest.mockImplementation(function () {
+        this.req.browserPreRequest = {
+          errorHandled: true,
+        }
+
+        throw new Error('oops')
+      })
+
+      error.mockImplementation(function () {
+        expect(this.error.message).toEqual('Internal error while proxying "GET url" in incomingRequest:\noops')
+        this.end()
+      })
+
+      const http = new Http(httpOpts)
+
+      http.addPendingBrowserPreRequest = vi.fn()
+
+      // @ts-expect-error
+      await http.handleHttpRequest({ method: 'GET', proxiedUrl: 'url' }, { on, off })
+      expect(incomingRequest).toHaveBeenCalledOnce()
+      expect(incomingResponse).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledOnce()
+      expect(http.addPendingBrowserPreRequest).not.toHaveBeenCalled()
+      expect(on).not.toHaveBeenCalled()
+      expect(off).toHaveBeenCalledTimes(3)
+    })
+
+    it('does not create fake pending browser pre request when the response is destroyed', async function () {
+      incomingRequest.mockImplementation(function () {
+        this.req.browserPreRequest = {
+          errorHandled: false,
+        }
+
+        this.res.destroyed = true
+
+        throw new Error('oops')
+      })
+
+      error.mockImplementation(function () {
+        expect(this.error.message).toEqual('Internal error while proxying "GET url" in incomingRequest:\noops')
+        this.end()
+      })
+
+      const http = new Http(httpOpts)
+
+      http.addPendingBrowserPreRequest = vi.fn()
+
+      // @ts-expect-error
+      await http.handleHttpRequest({ method: 'GET', proxiedUrl: 'url' }, { on, off })
+      expect(incomingRequest).toHaveBeenCalledOnce()
+      expect(incomingResponse).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledOnce()
+      expect(http.addPendingBrowserPreRequest).not.toHaveBeenCalled()
+      expect(on).not.toHaveBeenCalled()
+      expect(off).toHaveBeenCalledTimes(3)
+    })
+
+    it('moves to Error stack if err in IncomingResponse', async function () {
+      incomingRequest.mockImplementation(function () {
         this.incomingRes = {}
         this.end()
       })
 
-      incomingResponse.throws(new Error('oops'))
+      incomingResponse.mockImplementation(() => {
+        throw new Error('oops')
+      })
 
-      error.callsFake(function () {
-        expect(this.error.message).to.eq('oops')
+      error.mockImplementation(function () {
+        expect(this.error.message).toEqual('Internal error while proxying "GET url" in incomingResponse:\noops')
         this.end()
       })
 
-      return new Http(httpOpts)
-      .handle({}, {})
-      .then(function () {
-        expect(incomingRequest).to.be.calledOnce
-        expect(incomingResponse).to.be.calledOnce
-        expect(error).to.be.calledOnce
-      })
+      // @ts-expect-error
+      await new Http(httpOpts).handleHttpRequest({ method: 'GET', proxiedUrl: 'url' }, { on, off })
+      expect(incomingRequest).toHaveBeenCalledOnce()
+      expect(incomingResponse).toHaveBeenCalledOnce()
+      expect(error).toHaveBeenCalledOnce()
+      expect(on).toHaveBeenCalledOnce()
+      expect(off).toHaveBeenCalledTimes(4)
     })
 
-    it('self can be modified by middleware and passed on', function () {
+    it('self can be modified by middleware and passed on', async function () {
       const reqAdded = {}
       const resAdded = {}
       const errorAdded = {}
 
-      let expectedKeys = ['req', 'res', 'config', 'getRemoteState', 'middleware']
+      let expectedKeys = ['req', 'res', 'config', 'middleware']
 
-      incomingRequest.callsFake(function () {
-        expect(this).to.include.keys(expectedKeys)
+      incomingRequest.mockImplementation(function () {
+        const keys = Object.keys(this)
+
+        expect(keys).toEqual(expect.arrayContaining(expectedKeys))
         this.reqAdded = reqAdded
         expectedKeys.push('reqAdded')
         this.next()
       })
 
-      const incomingRequest2 = sinon.stub().callsFake(function () {
-        expect(this).to.include.keys(expectedKeys)
-        expect(this.reqAdded).to.equal(reqAdded)
+      const incomingRequest2 = vi.fn().mockImplementation(function () {
+        const keys = Object.keys(this)
+
+        expect(keys).toEqual(expect.arrayContaining(expectedKeys))
+        expect(this.reqAdded).toEqual(reqAdded)
         this.incomingRes = {}
         expectedKeys.push('incomingRes')
         this.end()
       })
 
-      incomingResponse.callsFake(function () {
-        expect(this).to.include.keys(expectedKeys)
+      incomingResponse.mockImplementation(function () {
+        const keys = Object.keys(this)
+
+        expect(keys).toEqual(expect.arrayContaining(expectedKeys))
         this.resAdded = resAdded
         expectedKeys.push('resAdded')
         this.next()
       })
 
-      const incomingResponse2 = sinon.stub().callsFake(function () {
-        expect(this).to.include.keys(expectedKeys)
-        expect(this.resAdded).to.equal(resAdded)
+      const incomingResponse2 = vi.fn().mockImplementation(function () {
+        const keys = Object.keys(this)
+
+        expect(keys).toEqual(expect.arrayContaining(expectedKeys))
+        expect(this.resAdded).toEqual(resAdded)
         expectedKeys.push('error')
         throw new Error('goto error stack')
       })
 
-      error.callsFake(function () {
-        expect(this.error.message).to.eq('goto error stack')
-        expect(this).to.include.keys(expectedKeys)
+      error.mockImplementation(function () {
+        expect(this.error.message).toEqual('Internal error while proxying "GET url" in incomingResponse2:\ngoto error stack')
+        const keys = Object.keys(this)
+
+        expect(keys).toEqual(expect.arrayContaining(expectedKeys))
         this.errorAdded = errorAdded
         this.next()
       })
 
-      const error2 = sinon.stub().callsFake(function () {
-        expect(this).to.include.keys(expectedKeys)
-        expect(this.errorAdded).to.equal(errorAdded)
+      const error2 = vi.fn().mockImplementation(function () {
+        const keys = Object.keys(this)
+
+        expect(keys).toEqual(expect.arrayContaining(expectedKeys))
+        expect(this.errorAdded).toEqual(errorAdded)
         this.end()
       })
 
-      middleware[HttpStages.IncomingRequest].push(incomingRequest2)
-      middleware[HttpStages.IncomingResponse].push(incomingResponse2)
-      middleware[HttpStages.Error].push(error2)
+      middleware[HttpStages.IncomingRequest].incomingRequest2 = incomingRequest2
+      middleware[HttpStages.IncomingResponse].incomingResponse2 = incomingResponse2
+      middleware[HttpStages.Error].error2 = error2
 
-      return new Http(httpOpts)
-      .handle({}, {})
-      .then(function () {
-        [
-          incomingRequest, incomingRequest2,
-          incomingResponse, incomingResponse2,
-          error, error2,
-        ].forEach(function (fn) {
-          expect(fn).to.be.calledOnce
-        })
+      // @ts-expect-error
+      await new Http(httpOpts).handleHttpRequest({ method: 'GET', proxiedUrl: 'url' }, { on, off })
+      const middlewareFunctions = [
+        incomingRequest, incomingRequest2,
+        incomingResponse, incomingResponse2,
+        error, error2,
+      ]
+
+      middlewareFunctions.forEach(function (fn) {
+        expect(fn).toHaveBeenCalledOnce()
       })
+
+      expect(on).toHaveBeenCalledTimes(2)
+      expect(off).toHaveBeenCalledTimes(10)
+    })
+  })
+
+  describe('Http.reset', function () {
+    let httpOpts
+
+    beforeEach(function () {
+      httpOpts = { config: {}, middleware: {}, request: { rp: vi.fn() } }
+    })
+
+    it('resets preRequests when resetBetweenSpecs is true', function () {
+      const http = new Http(httpOpts)
+
+      http.preRequests.reset = vi.fn()
+
+      http.reset({ resetBetweenSpecs: true })
+
+      expect(http.preRequests.reset).toHaveBeenCalledOnce()
+    })
+
+    it('does not reset preRequests when resetBetweenSpecs is false', function () {
+      const http = new Http(httpOpts)
+
+      http.preRequests.reset = vi.fn()
+
+      http.reset({ resetBetweenSpecs: false })
+
+      expect(http.preRequests.reset).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('Service Worker', function () {
+    let config: CyServer.Config & Cypress.Config
+    let middleware: HttpMiddlewareStacks
+    let incomingRequest: Mock<HttpMiddleware<any>>
+    let incomingResponse: Mock<HttpMiddleware<any>>
+    let error: Mock
+    let httpOpts: ServerCtx & { middleware?: HttpMiddlewareStacks }
+
+    beforeEach(function () {
+      config = {} as CyServer.Config & Cypress.Config
+      incomingRequest = vi.fn()
+      incomingResponse = vi.fn()
+      error = vi.fn()
+
+      middleware = {
+        [HttpStages.IncomingRequest]: { incomingRequest },
+        [HttpStages.IncomingResponse]: { incomingResponse },
+        [HttpStages.Error]: { error },
+      }
+
+      httpOpts = { config, middleware, request: { rp: vi.fn() } } as ServerCtx & { middleware?: HttpMiddlewareStacks } & { request: { rp: Mock } }
+    })
+
+    it('properly ignores requests that are controlled by a service worker', () => {
+      const http = new Http(httpOpts)
+      const processBrowserPreRequestStub = vi.spyOn(http.serviceWorkerManager, 'processBrowserPreRequest')
+      const addPendingStub = vi.spyOn(http.preRequests, 'addPending')
+      const browserPreRequest = {
+        requestId: '1234',
+        url: 'foo',
+        method: 'GET',
+        headers: {},
+        resourceType: 'xhr',
+        originalResourceType: undefined,
+        documentURL: 'foo',
+        cdpRequestWillBeSentTimestamp: 1,
+        cdpRequestWillBeSentReceivedTimestamp: performance.now() + performance.timeOrigin + 10000,
+      }
+
+      processBrowserPreRequestStub.mockResolvedValue(true)
+
+      http.addPendingBrowserPreRequest(browserPreRequest as BrowserPreRequest)
+
+      expect(processBrowserPreRequestStub).toHaveBeenCalledWith(browserPreRequest)
+      expect(addPendingStub).not.toHaveBeenCalled()
+    })
+
+    it('processes service worker registration updated events', () => {
+      const http = new Http(httpOpts)
+      const updateServiceWorkerRegistrationsStub = vi.spyOn(http.serviceWorkerManager, 'updateServiceWorkerRegistrations')
+      const registrations = [{
+        registrationId: '1234',
+        scopeURL: 'foo',
+        isDeleted: false,
+      }, {
+        registrationId: '1235',
+        scopeURL: 'bar',
+        isDeleted: true,
+      }]
+
+      http.updateServiceWorkerRegistrations({
+        registrations,
+      })
+
+      expect(updateServiceWorkerRegistrationsStub).toHaveBeenCalledWith({
+        registrations,
+      })
+    })
+
+    it('processes service worker version updated events', () => {
+      const http = new Http(httpOpts)
+      const updateServiceWorkerVersionsStub = vi.spyOn(http.serviceWorkerManager, 'updateServiceWorkerVersions')
+      const versions = [{
+        versionId: '1234',
+        registrationId: '1234',
+        scriptURL: 'foo',
+        runningStatus: 'stopped',
+        status: 'activating',
+      }, {
+        versionId: '1235',
+        registrationId: '1235',
+        scriptURL: 'bar',
+        runningStatus: 'running',
+        status: 'activated',
+      }]
+
+      http.updateServiceWorkerVersions({
+        versions,
+      } as any)
+
+      expect(updateServiceWorkerVersionsStub).toHaveBeenCalledWith({
+        versions,
+      })
+    })
+
+    it('processes service worker client side registration updated events', () => {
+      const http = new Http(httpOpts)
+      const addInitiatorToServiceWorkerStub = vi.spyOn(http.serviceWorkerManager, 'addInitiatorToServiceWorker')
+      const registration = {
+        scriptURL: 'foo',
+        initiatorOrigin: 'bar',
+      }
+
+      http.updateServiceWorkerClientSideRegistrations(registration)
+
+      expect(addInitiatorToServiceWorkerStub).toHaveBeenCalledWith(registration)
+    })
+
+    it('properly ignores service worker prerequests', () => {
+      const http = new Http(httpOpts)
+      const processBrowserPreRequestStub = vi.spyOn(http.serviceWorkerManager, 'processBrowserPreRequest')
+
+      http.addPendingBrowserPreRequest({
+        requestId: '1234',
+        url: 'foo',
+        method: 'GET',
+        headers: {
+          'Service-Worker': 'script',
+        },
+        resourceType: 'xhr',
+        originalResourceType: undefined,
+        documentURL: 'foo',
+        cdpRequestWillBeSentTimestamp: 1,
+        cdpRequestWillBeSentReceivedTimestamp: performance.now() + performance.timeOrigin + 10000,
+      })
+
+      http.addPendingBrowserPreRequest({
+        requestId: '1234',
+        url: 'foo',
+        method: 'GET',
+        headers: {},
+        resourceType: 'xhr',
+        originalResourceType: undefined,
+        documentURL: 'foo',
+        cdpRequestWillBeSentTimestamp: 1,
+        cdpRequestWillBeSentReceivedTimestamp: performance.now() + performance.timeOrigin + 10000,
+      })
+
+      expect(processBrowserPreRequestStub).toHaveBeenCalledOnce()
+    })
+
+    it('handles service worker client events', () => {
+      const http = new Http(httpOpts)
+      const handleServiceWorkerClientEventStub = vi.spyOn(http.serviceWorkerManager, 'handleServiceWorkerClientEvent')
+
+      const event = {
+        type: 'fetchRequest' as const,
+        payload: {
+          url: 'https://www.example.com',
+          isControlled: true,
+        },
+        scope: 'foo',
+      }
+
+      http.handleServiceWorkerClientEvent(event)
+
+      expect(handleServiceWorkerClientEventStub).toHaveBeenCalledWith(event)
     })
   })
 })
